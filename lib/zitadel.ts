@@ -131,4 +131,27 @@ export const zitadelClient = {
 
     return response.json();
   },
+
+  async createTokens(sessionId: string, sessionToken: string) {
+  const response = await fetch(`${ZITADEL_API_URL}/oauth/v2/token`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+      client_id: process.env.CLIENT_ID!,
+      scope: 'openid profile email offline_access',
+      subject_token: sessionToken,
+      subject_token_type: 'urn:ietf:params:oauth:token-type:access_token',
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error_description || 'Failed to create tokens');
+  }
+
+  return response.json();
+}
 };
