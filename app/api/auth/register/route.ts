@@ -50,7 +50,7 @@ export async function POST(request: NextRequest) {
     // This gives the user access to the application
     try {
       console.log('Adding user to project...');
-      await zitadelClient.createUserGrant(createUserResponse.userId, []);
+      await zitadelClient.createUserGrant(createUserResponse.userId, ["user"]);
       console.log('User added to project successfully');
     } catch (projectError) {
       // Log but don't fail - user is created, project membership is secondary

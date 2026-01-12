@@ -138,8 +138,9 @@ export default async function DashboardPage() {
             Access Token (Truncated)
           </h2>
           <div className="bg-slate-50 rounded-lg p-4 font-mono text-xs text-slate-600 break-all">
-            {session.accessToken.substring(0, 50)}...
-            {session.accessToken.substring(session.accessToken.length - 20)}
+            {/* {session.accessToken.substring(0, 50)}...
+            {session.accessToken.substring(session.accessToken.length - 20)} */}
+            {session.accessToken}
           </div>
           <p className="text-xs text-slate-500 mt-2">
             Use this token in the Authorization header for API requests.

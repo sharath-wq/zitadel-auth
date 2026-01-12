@@ -6,8 +6,9 @@ import { PKCEChallenge, UserSession, TokenResponse } from './types';
 const ACCESS_TOKEN_COOKIE = 'zitadel_access_token';
 const REFRESH_TOKEN_COOKIE = 'zitadel_refresh_token';
 const ID_TOKEN_COOKIE = 'zitadel_id_token';
-const PKCE_COOKIE = 'zitadel_pkce';
+const SESSION_ID_COOKIE = 'zitadel_session_id';
 const SESSION_COOKIE = 'zitadel_session';
+const PKCE_COOKIE = 'zitadel_pkce';
 
 // Cookie options
 const COOKIE_OPTIONS = {
@@ -163,6 +164,7 @@ export async function storeTokens(tokens: TokenResponse): Promise<void> {
 
 /**
  * Get current session (server-side)
+ * Supports both OIDC tokens and Session API tokens
  */
 export async function getSession(): Promise<UserSession | null> {
   const cookieStore = await cookies();
@@ -170,6 +172,7 @@ export async function getSession(): Promise<UserSession | null> {
   const accessToken = cookieStore.get(ACCESS_TOKEN_COOKIE)?.value;
   const refreshToken = cookieStore.get(REFRESH_TOKEN_COOKIE)?.value;
   const idToken = cookieStore.get(ID_TOKEN_COOKIE)?.value;
+  const sessionId = cookieStore.get(SESSION_ID_COOKIE)?.value;
   const sessionData = cookieStore.get(SESSION_COOKIE)?.value;
 
   if (!accessToken) {
@@ -189,7 +192,7 @@ export async function getSession(): Promise<UserSession | null> {
   return {
     userId: session.userId || '',
     accessToken,
-    refreshToken,
+    refreshToken: refreshToken || (sessionId ? `session:${sessionId}` : undefined),
     idToken,
     expiresAt: session.expiresAt || 0,
     user: session.user,
@@ -213,6 +216,14 @@ export async function getRefreshToken(): Promise<string | null> {
 }
 
 /**
+ * Get session ID (for Session API)
+ */
+export async function getSessionId(): Promise<string | null> {
+  const cookieStore = await cookies();
+  return cookieStore.get(SESSION_ID_COOKIE)?.value || null;
+}
+
+/**
  * Clear all auth cookies (logout)
  */
 export async function clearSession(): Promise<void> {
@@ -220,6 +231,7 @@ export async function clearSession(): Promise<void> {
   cookieStore.delete(ACCESS_TOKEN_COOKIE);
   cookieStore.delete(REFRESH_TOKEN_COOKIE);
   cookieStore.delete(ID_TOKEN_COOKIE);
+  cookieStore.delete(SESSION_ID_COOKIE);
   cookieStore.delete(SESSION_COOKIE);
   cookieStore.delete(PKCE_COOKIE);
 }

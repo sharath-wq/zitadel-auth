@@ -14,6 +14,7 @@ import {
  * 
  * This client handles all Zitadel API interactions including:
  * - User management (v2 API)
+ * - Session management (v2 API) - for custom login UI
  * - Project membership (Management API)
  * - OIDC token operations
  * - Password reset flows
@@ -47,14 +48,26 @@ class ZitadelClient {
   }
 
   /**
-   * Handle API errors consistently
+   * Handle API errors consistently with better error messages
    */
   private async handleResponse<T>(response: Response): Promise<T> {
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({})) as ZitadelApiError;
-      throw new Error(
-        errorData.message || `API request failed with status ${response.status}`
-      );
+      const errorText = await response.text();
+      let errorMessage = `API request failed with status ${response.status}`;
+      
+      try {
+        const errorData = JSON.parse(errorText) as ZitadelApiError;
+        errorMessage = errorData.message || errorMessage;
+        console.error('Zitadel API Error:', {
+          status: response.status,
+          message: errorData.message,
+          details: errorData.details,
+        });
+      } catch {
+        console.error('Zitadel API Error (raw):', errorText);
+      }
+      
+      throw new Error(errorMessage);
     }
     return response.json() as Promise<T>;
   }
@@ -77,7 +90,7 @@ class ZitadelClient {
     displayName?: string;
   }): Promise<CreateHumanUserResponse> {
     const request: CreateHumanUserRequest = {
-      username: userData.email,
+      username: userData.username || userData.email,
       organization: {
         orgId: this.orgId,
       },
@@ -94,9 +107,6 @@ class ZitadelClient {
         password: userData.password,
         changeRequired: false,
       },
-      phone: {
-        phone: "1234567890"
-      }
     };
 
     const response = await fetch(`${this.issuer}/v2/users/human`, {
@@ -131,6 +141,109 @@ class ZitadelClient {
   }
 
   // ==========================================
+  // SESSION API (v2) - For Custom Login UI
+  // ==========================================
+
+  /**
+   * Create a new session with password check
+   * This is the recommended approach for custom login UIs
+   * 
+   * @see https://zitadel.com/docs/apis/resources/session_service_v2/session-service-create-session
+   */
+  async createSession(loginName: string, password: string): Promise<{
+    sessionId: string;
+    sessionToken: string;
+    userId: string;
+    factors: {
+      user?: {
+        id: string;
+        loginName: string;
+        displayName?: string;
+      };
+    };
+  }> {
+    const response = await fetch(`${this.issuer}/v2/sessions`, {
+      method: 'POST',
+      headers: this.getServiceHeaders(),
+      body: JSON.stringify({
+        checks: {
+          user: {
+            loginName: loginName,
+          },
+          password: {
+            password: password,
+          },
+        },
+        // Request lifetime for the session
+        lifetime: '43200s', // 12 hours
+      }),
+    });
+
+    const data = await this.handleResponse<{
+      details: { sequence: string; changeDate: string; resourceOwner: string };
+      sessionId: string;
+      sessionToken: string;
+    }>(response);
+
+    // Get session details to extract user info
+    const sessionDetails = await this.getSession(data.sessionId, data.sessionToken);
+
+    return {
+      sessionId: data.sessionId,
+      sessionToken: data.sessionToken,
+      userId: sessionDetails.session.factors?.user?.id || '',
+      factors: sessionDetails.session.factors,
+    };
+  }
+
+  /**
+   * Get session details
+   */
+  async getSession(sessionId: string, sessionToken: string): Promise<{
+    session: {
+      id: string;
+      creationDate: string;
+      changeDate: string;
+      sequence: string;
+      factors: {
+        user?: {
+          id: string;
+          loginName: string;
+          displayName?: string;
+          organizationId?: string;
+        };
+        password?: {
+          verifiedAt: string;
+        };
+      };
+      expirationDate?: string;
+    };
+  }> {
+    const response = await fetch(`${this.issuer}/v2/sessions/${sessionId}`, {
+      method: 'GET',
+      headers: {
+        ...this.getServiceHeaders(),
+        'x-zitadel-session-token': sessionToken,
+      },
+    });
+
+    return this.handleResponse(response);
+  }
+
+  /**
+   * Delete/invalidate a session (logout)
+   */
+  async deleteSession(sessionId: string, sessionToken: string): Promise<void> {
+    await fetch(`${this.issuer}/v2/sessions/${sessionId}`, {
+      method: 'DELETE',
+      headers: {
+        ...this.getServiceHeaders(),
+        'x-zitadel-session-token': sessionToken,
+      },
+    });
+  }
+
+  // ==========================================
   // PROJECT MEMBERSHIP (Management API)
   // ==========================================
 
@@ -141,7 +254,7 @@ class ZitadelClient {
    */
   async addUserToProject(
     userId: string,
-    roles: string[] = ['PROJECT_OWNER_VIEWER']
+    roles: string[] = ['user']
   ): Promise<AddProjectMemberResponse> {
     const response = await fetch(
       `${this.issuer}/management/v1/projects/${this.projectId}/members`,
@@ -150,7 +263,7 @@ class ZitadelClient {
         headers: this.getServiceHeaders(),
         body: JSON.stringify({
           userId,
-          roles,
+          // roles,
         }),
       }
     );
@@ -164,7 +277,7 @@ class ZitadelClient {
    */
   async createUserGrant(
     userId: string,
-    roleKeys: string[] = []
+    roleKeys: string[] = ['user']
   ): Promise<{ userGrantId: string }> {
     const response = await fetch(
       `${this.issuer}/management/v1/users/${userId}/grants`,
@@ -280,66 +393,24 @@ class ZitadelClient {
   }
 
   /**
-   * Refresh access token using refresh token
+   * Refresh session and return new tokens
    */
-  async refreshAccessToken(refreshToken: string): Promise<TokenResponse> {
-    const clientId = process.env.NEXT_PUBLIC_ZITADEL_CLIENT_ID || '';
-    const clientSecret = process.env.ZITADEL_CLIENT_SECRET;
+  async refreshSession(sessionId: string, sessionToken: string): Promise<{
+    sessionToken: string;
+    expiresAt: number;
+  }> {
+    // Validate session is still active
+    const sessionDetails = await this.getSession(sessionId, sessionToken);
+    
+    // Calculate expiry
+    const expiresAt = sessionDetails.session.expirationDate 
+      ? new Date(sessionDetails.session.expirationDate).getTime()
+      : Date.now() + 3600 * 1000;
 
-    const params = new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: refreshToken,
-      client_id: clientId,
-    });
-
-    if (clientSecret) {
-      params.append('client_secret', clientSecret);
-    }
-
-    const response = await fetch(`${this.issuer}/oauth/v2/token`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: params.toString(),
-    });
-
-    return this.handleResponse<TokenResponse>(response);
-  }
-
-  /**
-   * Resource Owner Password Credentials (ROPC) flow
-   * Note: This is less secure than PKCE and should only be used when necessary
-   */
-  async loginWithPassword(
-    username: string,
-    password: string,
-    scopes: string[] = ['openid', 'profile', 'email', 'offline_access']
-  ): Promise<TokenResponse> {
-    const clientId = process.env.NEXT_PUBLIC_ZITADEL_CLIENT_ID || '';
-    const clientSecret = process.env.ZITADEL_CLIENT_SECRET;
-
-    const params = new URLSearchParams({
-      grant_type: 'password',
-      username,
-      password,
-      scope: scopes.join(' '),
-      client_id: clientId,
-    });
-
-    if (clientSecret) {
-      params.append('client_secret', clientSecret);
-    }
-
-    const response = await fetch(`${this.issuer}/oauth/v2/token`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: params.toString(),
-    });
-
-    return this.handleResponse<TokenResponse>(response);
+    return {
+      sessionToken,
+      expiresAt,
+    };
   }
 
   /**
@@ -378,6 +449,37 @@ class ZitadelClient {
     });
 
     return this.handleResponse<Record<string, unknown>>(response);
+  }
+
+  /**
+   * Get user by ID
+   */
+  async getUserById(userId: string): Promise<{
+    user: {
+      userId: string;
+      state: string;
+      username: string;
+      loginNames: string[];
+      preferredLoginName: string;
+      human?: {
+        profile: {
+          givenName: string;
+          familyName: string;
+          displayName?: string;
+        };
+        email: {
+          email: string;
+          isVerified: boolean;
+        };
+      };
+    };
+  }> {
+    const response = await fetch(`${this.issuer}/v2/users/${userId}`, {
+      method: 'GET',
+      headers: this.getServiceHeaders(),
+    });
+
+    return this.handleResponse(response);
   }
 
   // ==========================================

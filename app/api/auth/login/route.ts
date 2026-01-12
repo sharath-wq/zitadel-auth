@@ -1,8 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { cookies } from 'next/headers';
 import { zitadelClient } from '@/lib/zitadel/client';
-import { generatePKCE, storePKCE, storeTokens } from '@/lib/zitadel/auth';
+import { generatePKCE, storePKCE } from '@/lib/zitadel/auth';
 import { getBaseUrl } from '@/lib/utils';
 import { z } from 'zod';
+
+// Cookie configuration
+const COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: 'lax' as const,
+  path: '/',
+};
 
 // Validation schema
 const loginSchema = z.object({
@@ -13,12 +22,14 @@ const loginSchema = z.object({
 /**
  * POST /api/auth/login
  * 
- * Two login modes are supported:
- * 1. ROPC (Resource Owner Password Credentials) - Direct login with username/password
- * 2. PKCE redirect - Redirects to Zitadel for authentication
+ * Uses Zitadel Session API v2 for authentication.
+ * This is the recommended approach for custom login UIs.
  * 
- * ROPC is used here for a seamless custom UI experience.
- * For higher security requirements, use the PKCE flow via GET.
+ * Flow:
+ * 1. Create session with user check + password check
+ * 2. Get user details from session
+ * 3. Store session info in cookies
+ * 4. Return session token for API access
  */
 export async function POST(request: NextRequest) {
   try {
@@ -38,27 +49,77 @@ export async function POST(request: NextRequest) {
 
     const { username, password } = validation.data;
 
-    // Use Resource Owner Password Credentials flow
-    // Note: This requires ROPC to be enabled in Zitadel
-    const tokens = await zitadelClient.loginWithPassword(
-      username,
-      password,
-      ['openid', 'profile', 'email', 'offline_access']
-    );
+    // Create session using Zitadel Session API v2
+    console.log('Creating session for user:', username);
+    const sessionResult = await zitadelClient.createSession(username, password);
 
-    // Store tokens in HTTP-only cookies
-    await storeTokens(tokens);
+    console.log('Session created:', {
+      sessionId: sessionResult.sessionId,
+      userId: sessionResult.userId,
+    });
+
+    // Get user details
+    let userDetails = null;
+    if (sessionResult.userId) {
+      try {
+        const userResponse = await zitadelClient.getUserById(sessionResult.userId);
+        userDetails = {
+          sub: userResponse.user.userId,
+          name: userResponse.user.human?.profile?.displayName || 
+                `${userResponse.user.human?.profile?.givenName} ${userResponse.user.human?.profile?.familyName}`,
+          given_name: userResponse.user.human?.profile?.givenName,
+          family_name: userResponse.user.human?.profile?.familyName,
+          email: userResponse.user.human?.email?.email,
+          email_verified: userResponse.user.human?.email?.isVerified,
+          preferred_username: userResponse.user.preferredLoginName,
+        };
+      } catch (e) {
+        console.warn('Could not fetch user details:', e);
+        // Use session factors as fallback
+        userDetails = {
+          sub: sessionResult.userId,
+          name: sessionResult.factors?.user?.displayName,
+          preferred_username: sessionResult.factors?.user?.loginName,
+        };
+      }
+    }
+
+    // Calculate expiry (12 hours from now, matching session lifetime)
+    const expiresAt = Date.now() + 12 * 60 * 60 * 1000;
+
+    // Store session in cookies
+    const cookieStore = await cookies();
+
+    // Store session ID
+    cookieStore.set('zitadel_session_id', sessionResult.sessionId, {
+      ...COOKIE_OPTIONS,
+      maxAge: 12 * 60 * 60, // 12 hours
+    });
+
+    // Store session token (this acts as the access token)
+    cookieStore.set('zitadel_access_token', sessionResult.sessionToken, {
+      ...COOKIE_OPTIONS,
+      maxAge: 12 * 60 * 60,
+    });
+
+    // Store user info for quick access
+    cookieStore.set('zitadel_session', JSON.stringify({
+      userId: sessionResult.userId,
+      expiresAt,
+      user: userDetails,
+    }), {
+      ...COOKIE_OPTIONS,
+      maxAge: 12 * 60 * 60,
+    });
 
     return NextResponse.json({
       success: true,
       message: 'Login successful',
-      // Return non-sensitive token info
-      expiresIn: tokens.expires_in,
-      tokenType: tokens.token_type,
-      // Include tokens for client-side use if needed
-      accessToken: tokens.access_token,
-      refreshToken: tokens.refresh_token,
-      idToken: tokens.id_token,
+      sessionId: sessionResult.sessionId,
+      userId: sessionResult.userId,
+      expiresIn: 12 * 60 * 60, // 12 hours in seconds
+      accessToken: sessionResult.sessionToken,
+      user: userDetails,
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -67,20 +128,14 @@ export async function POST(request: NextRequest) {
 
     // Handle common authentication errors
     if (
-      errorMessage.includes('invalid_grant') ||
-      errorMessage.includes('invalid credentials') ||
-      errorMessage.includes('INVALID_CREDENTIALS')
+      errorMessage.includes('password') ||
+      errorMessage.includes('credentials') ||
+      errorMessage.includes('user') ||
+      errorMessage.includes('authentication')
     ) {
       return NextResponse.json(
         { error: 'Invalid username or password' },
         { status: 401 }
-      );
-    }
-
-    if (errorMessage.includes('user not found') || errorMessage.includes('NOT_FOUND')) {
-      return NextResponse.json(
-        { error: 'User not found' },
-        { status: 404 }
       );
     }
 
@@ -91,8 +146,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (errorMessage.includes('not found') || errorMessage.includes('NOT_FOUND')) {
+      return NextResponse.json(
+        { error: 'User not found' },
+        { status: 404 }
+      );
+    }
+
     return NextResponse.json(
-      { error: 'Authentication failed. Please try again.' },
+      { error: errorMessage || 'Authentication failed. Please try again.' },
       { status: 500 }
     );
   }
@@ -102,7 +164,7 @@ export async function POST(request: NextRequest) {
  * GET /api/auth/login
  * 
  * Initiates PKCE OAuth2 flow by redirecting to Zitadel.
- * This is more secure than ROPC and is recommended for production.
+ * This is an alternative to the Session API approach.
  */
 export async function GET(request: NextRequest) {
   try {
