@@ -53,8 +53,8 @@ export function useAuth(): UseAuthReturn {
 
         // Decode JWT to get user info (basic decode without verification)
         const payload = decodeJWT(accessToken);
-        
-        if (payload && payload.exp && payload.exp * 1000 > Date.now()) {
+
+        if (payload && payload.exp && typeof payload.exp === 'number' && payload.exp * 1000 > Date.now()) {
           setState({
             isAuthenticated: true,
             isLoading: false,

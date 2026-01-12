@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation';
 import { getSession } from '@/lib/zitadel/auth';
-import { LogoutButton, RefreshTokenButton, SessionInfo } from './client';
+import { LogoutButton, RefreshTokenButton, SessionInfo, AccessTokenDisplay, GetOAuthTokenButton } from './client';
 
 export default async function DashboardPage() {
   const session = await getSession();
@@ -132,19 +132,48 @@ export default async function DashboardPage() {
           </div>
         </div>
 
-        {/* Access Token Preview (for demo) */}
+        {/* Access Token Display */}
         <div className="mt-8 bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-          <h2 className="text-lg font-semibold text-slate-900 mb-4">
-            Access Token (Truncated)
-          </h2>
-          <div className="bg-slate-50 rounded-lg p-4 font-mono text-xs text-slate-600 break-all">
-            {/* {session.accessToken.substring(0, 50)}...
-            {session.accessToken.substring(session.accessToken.length - 20)} */}
-            {session.accessToken}
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold text-slate-900">
+              Current Access Token
+            </h2>
+            <span className="text-xs text-slate-500 bg-slate-100 px-2 py-1 rounded">
+              Session Token
+            </span>
           </div>
-          <p className="text-xs text-slate-500 mt-2">
-            Use this token in the Authorization header for API requests.
-          </p>
+          <AccessTokenDisplay token={session.accessToken} />
+        </div>
+
+        {/* OAuth Token Exchange */}
+        <div className="mt-6 bg-blue-50 border border-blue-200 rounded-xl p-6">
+          <div className="flex items-start gap-4">
+            <div className="flex-shrink-0 w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
+              <svg
+                className="w-5 h-5 text-blue-600"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M13 10V3L4 14h7v7l9-11h-7z"
+                />
+              </svg>
+            </div>
+            <div className="flex-1">
+              <h3 className="text-sm font-semibold text-slate-900 mb-2">
+                Need a Standard OAuth 2.0 Token?
+              </h3>
+              <p className="text-sm text-slate-600 mb-4">
+                The current token is a ZITADEL session token. If you need a standard OAuth 2.0 access token
+                for API integrations, click the button below to exchange your session.
+              </p>
+              <GetOAuthTokenButton />
+            </div>
+          </div>
         </div>
       </main>
     </div>

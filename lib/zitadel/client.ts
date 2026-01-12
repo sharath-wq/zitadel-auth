@@ -243,6 +243,137 @@ class ZitadelClient {
     });
   }
 
+  /**
+   * Create OIDC auth request to exchange session for access token
+   * This allows getting proper OAuth tokens from a session
+   *
+   * @see https://zitadel.com/docs/guides/integrate/login-ui/oidc-standard
+   */
+  async createAuthRequest(params: {
+    redirectUri: string;
+    scopes?: string[];
+    codeChallenge?: string;
+    state?: string;
+  }): Promise<{
+    authRequestId: string;
+    authorizationUrl: string;
+  }> {
+    const clientId = process.env.NEXT_PUBLIC_ZITADEL_CLIENT_ID || '';
+    const scopes = params.scopes || ['openid', 'profile', 'email', 'offline_access'];
+
+    const requestParams = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: params.redirectUri,
+      scope: scopes.join(' '),
+      response_type: 'code',
+      ...(params.codeChallenge && {
+        code_challenge: params.codeChallenge,
+        code_challenge_method: 'S256',
+      }),
+      ...(params.state && { state: params.state }),
+    });
+
+    const response = await fetch(
+      `${this.issuer}/oauth/v2/authorize?${requestParams.toString()}`,
+      {
+        method: 'GET',
+        redirect: 'manual',
+      }
+    );
+
+    // Extract auth request ID from Location header or response
+    const location = response.headers.get('location') || '';
+
+    if (!location) {
+      throw new Error('No redirect location returned from authorize endpoint');
+    }
+
+    // The authRequest parameter contains the auth request ID
+    // Location can be relative, so provide base URL
+    const locationUrl = new URL(location, this.issuer);
+    const authRequestId = locationUrl.searchParams.get('authRequest') ||
+                          locationUrl.searchParams.get('authRequestID') || '';
+
+    if (!authRequestId) {
+      console.error('Failed to extract authRequestId from location:', location);
+      throw new Error('Could not extract auth request ID from authorization redirect');
+    }
+
+    return {
+      authRequestId,
+      authorizationUrl: location,
+    };
+  }
+
+  /**
+   * Set session on OIDC auth request
+   * This finalizes the auth request with a session token
+   */
+  async setAuthRequestSession(
+    authRequestId: string,
+    sessionId: string,
+    sessionToken: string
+  ): Promise<{
+    callbackUrl: string;
+  }> {
+    const response = await fetch(
+      `${this.issuer}/v2/oidc/auth_requests/${authRequestId}`,
+      {
+        method: 'POST',
+        headers: this.getServiceHeaders(),
+        body: JSON.stringify({
+          session: {
+            sessionId,
+            sessionToken,
+          },
+        }),
+      }
+    );
+
+    const data = await this.handleResponse<{
+      callbackUrl: string;
+    }>(response);
+
+    return data;
+  }
+
+  /**
+   * Exchange session for OIDC access token
+   * Complete flow: session -> auth request -> code -> tokens
+   */
+  async exchangeSessionForTokens(
+    sessionId: string,
+    sessionToken: string,
+    redirectUri: string,
+    codeVerifier: string,
+    codeChallenge: string
+  ): Promise<TokenResponse> {
+    // Create auth request
+    const authRequest = await this.createAuthRequest({
+      redirectUri,
+      codeChallenge,
+      scopes: ['openid', 'profile', 'email', 'offline_access', 'urn:zitadel:iam:org:project:id:zitadel:aud'],
+    });
+
+    // Set session on auth request
+    const callbackData = await this.setAuthRequestSession(
+      authRequest.authRequestId,
+      sessionId,
+      sessionToken
+    );
+
+    // Extract code from callback URL
+    const callbackUrl = new URL(callbackData.callbackUrl);
+    const code = callbackUrl.searchParams.get('code');
+
+    if (!code) {
+      throw new Error('No authorization code returned');
+    }
+
+    // Exchange code for tokens
+    return this.exchangeCodeForTokens(code, codeVerifier, redirectUri);
+  }
+
   // ==========================================
   // PROJECT MEMBERSHIP (Management API)
   // ==========================================

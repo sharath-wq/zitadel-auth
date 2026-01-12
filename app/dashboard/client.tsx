@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { LogOut, RefreshCw } from 'lucide-react';
+import { LogOut, RefreshCw, Copy, Check, Key } from 'lucide-react';
 import type { UserSession } from '@/lib/zitadel/types';
 
 export function LogoutButton() {
@@ -148,5 +148,113 @@ export function SessionInfo({ session }: SessionInfoProps) {
         </dd>
       </div>
     </dl>
+  );
+}
+
+interface AccessTokenDisplayProps {
+  token: string;
+}
+
+export function AccessTokenDisplay({ token }: AccessTokenDisplayProps) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(token);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (error) {
+      console.error('Failed to copy:', error);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="bg-slate-50 rounded-lg p-4 border border-slate-200">
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex-1 overflow-hidden">
+            <p className="text-xs font-mono text-slate-600 break-all leading-relaxed">
+              {token}
+            </p>
+          </div>
+          <button
+            onClick={handleCopy}
+            className="flex-shrink-0 p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-200 rounded-lg transition-colors"
+            title="Copy to clipboard"
+          >
+            {copied ? (
+              <Check className="w-4 h-4 text-green-600" />
+            ) : (
+              <Copy className="w-4 h-4" />
+            )}
+          </button>
+        </div>
+      </div>
+      <p className="text-xs text-slate-500">
+        Use this token in the Authorization header: <code className="text-slate-700">Bearer {token.substring(0, 20)}...</code>
+      </p>
+    </div>
+  );
+}
+
+export function GetOAuthTokenButton() {
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const router = useRouter();
+
+  const handleGetToken = async () => {
+    setLoading(true);
+    setMessage(null);
+
+    try {
+      const response = await fetch('/api/auth/access-token', { method: 'POST' });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to get OAuth access token');
+      }
+
+      setMessage({
+        type: 'success',
+        text: 'OAuth access token obtained! Refreshing page...'
+      });
+
+      // Refresh the page to show new token
+      setTimeout(() => {
+        router.refresh();
+      }, 1000);
+    } catch (error) {
+      setMessage({
+        type: 'error',
+        text: error instanceof Error ? error.message : 'Failed to get OAuth access token',
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div>
+      <button
+        onClick={handleGetToken}
+        disabled={loading}
+        className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors disabled:opacity-50"
+      >
+        <Key className={`w-4 h-4 ${loading ? 'animate-pulse' : ''}`} />
+        {loading ? 'Getting OAuth Token...' : 'Get OAuth Access Token'}
+      </button>
+      {message && (
+        <p
+          className={`mt-2 text-sm ${
+            message.type === 'success' ? 'text-green-600' : 'text-red-600'
+          }`}
+        >
+          {message.text}
+        </p>
+      )}
+      <p className="text-xs text-slate-500 mt-2">
+        Exchange your session for a standard OAuth 2.0 access token
+      </p>
+    </div>
   );
 }
