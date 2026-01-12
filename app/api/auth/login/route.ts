@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { zitadelClient } from '@/lib/zitadel/client';
-import { generatePKCE, storePKCE } from '@/lib/zitadel/auth';
+import { generatePKCE, storePKCE, storeTokens } from '@/lib/zitadel/auth';
 import { getBaseUrl } from '@/lib/utils';
 import { z } from 'zod';
 
@@ -21,15 +21,16 @@ const loginSchema = z.object({
 
 /**
  * POST /api/auth/login
- * 
+ *
  * Uses Zitadel Session API v2 for authentication.
  * This is the recommended approach for custom login UIs.
- * 
+ *
  * Flow:
  * 1. Create session with user check + password check
  * 2. Get user details from session
- * 3. Store session info in cookies
- * 4. Return session token for API access
+ * 3. Immediately exchange session for OAuth tokens (access token, refresh token, ID token)
+ * 4. Store OAuth tokens and session info in cookies
+ * 5. Return OAuth access token for API access
  */
 export async function POST(request: NextRequest) {
   try {
@@ -84,32 +85,33 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Calculate expiry (12 hours from now, matching session lifetime)
-    const expiresAt = Date.now() + 12 * 60 * 60 * 1000;
+    // Exchange session for OAuth access token immediately
+    console.log('Exchanging session for OAuth tokens...');
+    const baseUrl = getBaseUrl();
+    const redirectUri = `${baseUrl}/api/auth/callback`;
 
-    // Store session in cookies
+    // Generate PKCE for token exchange
+    const pkce = await generatePKCE();
+
+    // Exchange session for OIDC tokens
+    const tokens = await zitadelClient.exchangeSessionForTokens(
+      sessionResult.sessionId,
+      sessionResult.sessionToken,
+      redirectUri,
+      pkce.codeVerifier,
+      pkce.codeChallenge
+    );
+
+    console.log('OAuth tokens obtained successfully');
+
+    // Store the OAuth tokens in cookies
+    await storeTokens(tokens);
+
+    // Also store session ID for reference
     const cookieStore = await cookies();
-
-    // Store session ID
     cookieStore.set('zitadel_session_id', sessionResult.sessionId, {
       ...COOKIE_OPTIONS,
       maxAge: 12 * 60 * 60, // 12 hours
-    });
-
-    // Store session token (this acts as the access token)
-    cookieStore.set('zitadel_access_token', sessionResult.sessionToken, {
-      ...COOKIE_OPTIONS,
-      maxAge: 12 * 60 * 60,
-    });
-
-    // Store user info for quick access
-    cookieStore.set('zitadel_session', JSON.stringify({
-      userId: sessionResult.userId,
-      expiresAt,
-      user: userDetails,
-    }), {
-      ...COOKIE_OPTIONS,
-      maxAge: 12 * 60 * 60,
     });
 
     return NextResponse.json({
@@ -117,8 +119,10 @@ export async function POST(request: NextRequest) {
       message: 'Login successful',
       sessionId: sessionResult.sessionId,
       userId: sessionResult.userId,
-      expiresIn: 12 * 60 * 60, // 12 hours in seconds
-      accessToken: sessionResult.sessionToken,
+      expiresIn: tokens.expires_in,
+      accessToken: tokens.access_token,
+      tokenType: tokens.token_type,
+      refreshToken: tokens.refresh_token ? 'present' : 'not_present',
       user: userDetails,
     });
   } catch (error) {
