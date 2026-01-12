@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { zitadelClient } from '@/lib/zitadel/client';
-import { getSessionId, getAccessToken } from '@/lib/zitadel/auth';
+import { getRefreshToken, storeTokens, clearSession } from '@/lib/zitadel/auth';
 
 // Cookie configuration
 const COOKIE_OPTIONS = {
@@ -13,102 +13,93 @@ const COOKIE_OPTIONS = {
 
 /**
  * POST /api/auth/refresh
- * 
- * Validates and extends the current session.
- * For Session API, this checks if the session is still valid.
+ *
+ * Uses OAuth2 refresh token to obtain a new access token.
+ * This extends the user's session without requiring re-authentication.
+ *
+ * Flow:
+ * 1. Get refresh token from HTTP-only cookie
+ * 2. Exchange refresh token for new access token via OAuth2
+ * 3. Store new tokens in cookies
+ * 4. Return new access token to client
  */
 export async function POST(request: NextRequest) {
   try {
-    const sessionId = await getSessionId();
-    const sessionToken = await getAccessToken();
+    // Get refresh token from cookie
+    const refreshToken = await getRefreshToken();
 
-    if (!sessionId || !sessionToken) {
+    if (!refreshToken) {
       return NextResponse.json(
-        { error: 'No active session found' },
+        { error: 'No refresh token found. Please log in again.' },
         { status: 401 }
       );
     }
 
-    // Validate session with Zitadel
-    const sessionDetails = await zitadelClient.getSession(sessionId, sessionToken);
+    console.log('Refreshing access token using OAuth2 refresh token...');
 
-    // Check if session is expired
-    if (sessionDetails.session.expirationDate) {
-      const expiresAt = new Date(sessionDetails.session.expirationDate).getTime();
-      if (expiresAt < Date.now()) {
-        return NextResponse.json(
-          { error: 'Session expired. Please log in again.' },
-          { status: 401 }
-        );
-      }
-    }
+    // Exchange refresh token for new tokens via OAuth2
+    const newTokens = await zitadelClient.refreshAccessToken(refreshToken);
 
-    // Get user details
+    console.log('New tokens obtained successfully');
+
+    // Store the new tokens in cookies
+    await storeTokens(newTokens);
+
+    // Extract user info from ID token if available
     let userDetails = null;
-    const userId = sessionDetails.session.factors?.user?.id;
-    
-    if (userId) {
+    if (newTokens.id_token) {
       try {
-        const userResponse = await zitadelClient.getUserById(userId);
+        const jose = await import('jose');
+        const decoded = jose.decodeJwt(newTokens.id_token);
         userDetails = {
-          sub: userResponse.user.userId,
-          name: userResponse.user.human?.profile?.displayName || 
-                `${userResponse.user.human?.profile?.givenName} ${userResponse.user.human?.profile?.familyName}`,
-          given_name: userResponse.user.human?.profile?.givenName,
-          family_name: userResponse.user.human?.profile?.familyName,
-          email: userResponse.user.human?.email?.email,
-          email_verified: userResponse.user.human?.email?.isVerified,
-          preferred_username: userResponse.user.preferredLoginName,
+          sub: decoded.sub as string,
+          name: decoded.name as string | undefined,
+          given_name: decoded.given_name as string | undefined,
+          family_name: decoded.family_name as string | undefined,
+          email: decoded.email as string | undefined,
+          email_verified: decoded.email_verified as boolean | undefined,
+          preferred_username: decoded.preferred_username as string | undefined,
         };
       } catch (e) {
-        console.warn('Could not fetch user details:', e);
+        console.warn('Could not decode ID token:', e);
       }
     }
-
-    // Calculate remaining time
-    const expiresAt = sessionDetails.session.expirationDate 
-      ? new Date(sessionDetails.session.expirationDate).getTime()
-      : Date.now() + 12 * 60 * 60 * 1000;
-    
-    const expiresIn = Math.floor((expiresAt - Date.now()) / 1000);
-
-    // Update session cookie with fresh data
-    const cookieStore = await cookies();
-    cookieStore.set('zitadel_session', JSON.stringify({
-      userId,
-      expiresAt,
-      user: userDetails,
-    }), {
-      ...COOKIE_OPTIONS,
-      maxAge: expiresIn,
-    });
 
     return NextResponse.json({
       success: true,
-      message: 'Session validated successfully',
-      expiresIn,
-      accessToken: sessionToken,
+      message: 'Access token refreshed successfully',
+      accessToken: newTokens.access_token,
+      tokenType: newTokens.token_type,
+      expiresIn: newTokens.expires_in,
+      refreshToken: newTokens.refresh_token ? 'present' : 'not_present',
       user: userDetails,
     });
   } catch (error) {
-    console.error('Session refresh error:', error);
+    console.error('Token refresh error:', error);
 
-    const errorMessage = error instanceof Error ? error.message : 'Session validation failed';
+    const errorMessage = error instanceof Error ? error.message : 'Token refresh failed';
 
-    // Handle session expiry
+    // Handle refresh token expiry or invalidity
     if (
-      errorMessage.includes('not found') ||
+      errorMessage.includes('invalid') ||
       errorMessage.includes('expired') ||
-      errorMessage.includes('invalid')
+      errorMessage.includes('revoked') ||
+      errorMessage.includes('not found')
     ) {
+      // Clear all auth cookies since refresh failed
+      await clearSession();
+
       return NextResponse.json(
-        { error: 'Session expired. Please log in again.' },
+        { error: 'Refresh token expired or invalid. Please log in again.' },
         { status: 401 }
       );
     }
 
     return NextResponse.json(
-      { error: 'Failed to validate session' },
+      {
+        error: errorMessage,
+        details: 'Failed to refresh access token'
+      },
       { status: 500 }
     );
   }

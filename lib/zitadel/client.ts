@@ -524,7 +524,39 @@ class ZitadelClient {
   }
 
   /**
+   * Refresh access token using OAuth2 refresh token
+   *
+   * @see https://zitadel.com/docs/guides/integrate/token-introspection/refresh-token
+   */
+  async refreshAccessToken(refreshToken: string): Promise<TokenResponse> {
+    const clientId = process.env.NEXT_PUBLIC_ZITADEL_CLIENT_ID || '';
+    const clientSecret = process.env.ZITADEL_CLIENT_SECRET;
+
+    const params = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      client_id: clientId,
+    });
+
+    // Add client secret if using confidential client
+    if (clientSecret) {
+      params.append('client_secret', clientSecret);
+    }
+
+    const response = await fetch(`${this.issuer}/oauth/v2/token`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: params.toString(),
+    });
+
+    return this.handleResponse<TokenResponse>(response);
+  }
+
+  /**
    * Refresh session and return new tokens
+   * @deprecated Use refreshAccessToken for OAuth token refresh
    */
   async refreshSession(sessionId: string, sessionToken: string): Promise<{
     sessionToken: string;
@@ -532,9 +564,9 @@ class ZitadelClient {
   }> {
     // Validate session is still active
     const sessionDetails = await this.getSession(sessionId, sessionToken);
-    
+
     // Calculate expiry
-    const expiresAt = sessionDetails.session.expirationDate 
+    const expiresAt = sessionDetails.session.expirationDate
       ? new Date(sessionDetails.session.expirationDate).getTime()
       : Date.now() + 3600 * 1000;
 
